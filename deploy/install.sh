@@ -23,9 +23,18 @@ die() { printf '\n\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [ "$(id -u)" -eq 0 ] || die "run as root"
 
-log "Checking the port is still free"
+log "Checking the port"
+# On a redeploy ORCA's own web container is holding the port, which is fine --
+# compose replaces it. Only a *foreign* listener is a problem, so ask docker
+# who owns it before refusing.
 if ss -tln | grep -qE "127\.0\.0\.1:${PORT}\b"; then
-    die "127.0.0.1:${PORT} is already in use. Pick another port and update deploy/docker-compose.prod.yml and deploy/orca.nginx.conf."
+    owner="$(docker ps --filter "publish=${PORT}" --format '{{.Label "com.docker.compose.project"}}' | head -1)"
+    if [ "${owner}" = "orca" ]; then
+        echo "port ${PORT} held by the existing orca stack; it will be replaced"
+    else
+        die "127.0.0.1:${PORT} is in use by something other than ORCA${owner:+ (compose project: ${owner})}.
+Pick another port and update deploy/docker-compose.prod.yml and deploy/orca.nginx.conf."
+    fi
 fi
 
 log "Ensuring the docker compose plugin is present"
