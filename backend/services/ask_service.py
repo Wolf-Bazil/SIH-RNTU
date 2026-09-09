@@ -482,8 +482,15 @@ async def ask_endpoint(req: AskRequest):
             # 2. Find the place, if the question names one. A miss is ordinary:
             #    most questions do not name a place, and those are answered for
             #    the point the dashboard is showing.
-            place = await extract_place(question)
-            intent, reason = classify(question, place.get("found", False))
+            place = await extract_place(question, lang)
+            intent, reason = classify(question, place.get("found", False),
+                                      place.get("matched_on"),
+                                      place.get("country"),
+                                      in_conversation=bool(history))
+            if intent == Intent.OUT_OF_SCOPE:
+                # The geocoder matched a word that was not a place after all,
+                # so the "location" must not be reported back as one.
+                place = {"found": False}
 
         if intent == Intent.UNSAFE:
             return {
