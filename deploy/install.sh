@@ -43,12 +43,20 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 log "Fetching the code into ${APP_DIR}"
-if [ -d "${APP_DIR}/.git" ]; then
-    git -C "${APP_DIR}" fetch --depth 1 origin main
-    git -C "${APP_DIR}" reset --hard origin/main
-else
-    git clone --depth 1 "${REPO_URL}" "${APP_DIR}"
+# The directory usually already exists, because .env has to be copied in
+# before the first run. Initialise in place rather than cloning, so a
+# non-empty target is not an error and .env is never disturbed.
+if [ ! -d "${APP_DIR}/.git" ]; then
+    mkdir -p "${APP_DIR}"
+    git -C "${APP_DIR}" init -q
+    git -C "${APP_DIR}" remote add origin "${REPO_URL}"
 fi
+git -C "${APP_DIR}" remote set-url origin "${REPO_URL}"
+git -C "${APP_DIR}" fetch --depth 1 origin main
+# Tracked files are forced to match origin/main; .env is untracked and so is
+# left alone by both reset and clean.
+git -C "${APP_DIR}" reset --hard origin/main
+git -C "${APP_DIR}" clean -fd -e .env
 
 # .env is gitignored, so it never arrives with the clone. Copy it up first:
 #   scp .env root@160.250.205.84:/opt/orca/.env
