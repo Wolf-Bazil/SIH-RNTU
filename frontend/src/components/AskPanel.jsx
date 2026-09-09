@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { IconSend } from './Icons'
 
 /**
@@ -68,23 +68,44 @@ function Advisory({ text }) {
 const SUGGESTIONS = [
   'Is it safe to fish today?',
   'Cyclone risk near Visakhapatnam',
-  'Weather in Paradip',
+  'What does the hazard index mean?',
 ]
+
+// Only the turns the backend will actually keep are sent back up. Trimming here
+// too keeps the request small on a long conversation.
+const HISTORY_TURNS = 6
 
 export default function AskPanel({ language, station, t }) {
   const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState(null)
-  const [meta, setMeta] = useState(null)
+  // The conversation, oldest first. Each turn is { role, content, meta }.
+  const [turns, setTurns] = useState([])
   const [loading, setLoading] = useState(false)
   const [failed, setFailed] = useState(false)
   const inputRef = useRef(null)
+  const scrollRef = useRef(null)
+
+  // Follow the conversation as it grows, so the newest answer is in view
+  // without the user scrolling on a small panel.
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [turns, loading])
 
   const ask = async (q) => {
     const text = (q ?? question).trim()
     if (!text || loading) return
+
+    // The history sent is the conversation *before* this question, which is
+    // what the backend expects to prepend to it.
+    const history = turns
+      .slice(-HISTORY_TURNS)
+      .map(({ role, content }) => ({ role, content }))
+
+    setTurns((prev) => [...prev, { role: 'user', content: text }])
+    setQuestion('')
     setLoading(true)
     setFailed(false)
-    setAnswer(null)
+
     try {
       const res = await fetch('/api/ask', {
         method: 'POST',
@@ -96,22 +117,79 @@ export default function AskPanel({ language, station, t }) {
           language,
           lat: station?.lat,
           lon: station?.lon,
+          history,
         }),
       })
       if (!res.ok) throw new Error(`ask returned ${res.status}`)
       const json = await res.json()
-      setAnswer(json.answer)
-      setMeta({ live: json.live, observedAt: json.observed_at, sources: json.sources })
+      setTurns((prev) => [...prev, {
+        role: 'assistant',
+        content: json.answer,
+        meta: {
+          live: json.live,
+          observedAt: json.observed_at,
+          sources: json.sources,
+          intent: json.intent,
+        },
+      }])
     } catch {
+      // The failed question stays in the transcript so the user can retry it
+      // by editing rather than retyping.
       setFailed(true)
     } finally {
       setLoading(false)
+      inputRef.current?.focus()
     }
   }
 
+  const started = turns.length > 0
+
   return (
-    <section className="card p-4">
-      <h2 className="mb-2.5 text-sm font-bold text-abyss-900">{t('ask')}</h2>
+    <section className="card flex flex-col p-4">
+      <div className="mb-2.5 flex items-center justify-between">
+        <h2 className="text-sm font-bold text-abyss-900">{t('ask')}</h2>
+        {started && (
+          <button
+            type="button"
+            onClick={() => { setTurns([]); setFailed(false); setQuestion('') }}
+            className="focusable rounded-md px-2 py-1 text-[10px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-abyss-700"
+          >
+            {t('clearChat')}
+          </button>
+        )}
+      </div>
+
+      {started && (
+        <div ref={scrollRef} className="scroll-slim mb-2.5 max-h-80 space-y-2 overflow-y-auto pr-1">
+          {turns.map((turn, i) => (
+            turn.role === 'user' ? (
+              <div key={i} className="flex justify-end">
+                <p className="max-w-[85%] rounded-lg rounded-br-sm bg-abyss-700 px-2.5 py-1.5 text-[11.5px] leading-relaxed text-white">
+                  {turn.content}
+                </p>
+              </div>
+            ) : (
+              <div key={i} className="animate-fade-up rounded-lg border border-slate-200 bg-gradient-to-b from-white to-slate-50/70 p-3">
+                <Advisory text={turn.content} />
+                {turn.meta?.observedAt && (
+                  <div className="mt-2 border-t border-slate-100 pt-2 font-mono text-[9.5px] text-slate-400">
+                    {turn.meta.live ? `${t('observed')} ${turn.meta.observedAt}Z` : 'no live feed'}
+                    {turn.meta.sources?.length ? ` · ${turn.meta.sources.join(', ')}` : ''}
+                  </div>
+                )}
+              </div>
+            )
+          ))}
+
+          {loading && (
+            <div className="space-y-2 rounded-lg border border-slate-200 bg-white p-3">
+              <div className="h-3 w-2/5 rounded shimmer" />
+              <div className="h-3 w-full rounded shimmer" />
+              <div className="h-3 w-4/5 rounded shimmer" />
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="relative">
         <textarea
@@ -125,7 +203,7 @@ export default function AskPanel({ language, station, t }) {
               ask()
             }
           }}
-          placeholder={t('askPlaceholder')}
+          placeholder={started ? t('askAgain') : t('askPlaceholder')}
           className="focusable w-full resize-none rounded-lg border border-slate-200 bg-slate-50/60 p-2.5 pr-11 text-[11.5px] leading-relaxed text-abyss-900 placeholder:text-slate-400 transition-colors hover:border-slate-300 focus:bg-white"
         />
         <button
@@ -143,13 +221,13 @@ export default function AskPanel({ language, station, t }) {
         </button>
       </div>
 
-      {!answer && !loading && (
+      {!started && !loading && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {SUGGESTIONS.map((s) => (
             <button
               key={s}
               type="button"
-              onClick={() => { setQuestion(s); ask(s) }}
+              onClick={() => ask(s)}
               className="focusable rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[10px] font-medium text-slate-600 transition-all hover:border-abyss-300 hover:bg-abyss-50 hover:text-abyss-800"
             >
               {s}
@@ -158,32 +236,10 @@ export default function AskPanel({ language, station, t }) {
         </div>
       )}
 
-      {loading && (
-        <div className="mt-3 space-y-2">
-          <div className="h-3 w-2/5 rounded shimmer" />
-          <div className="h-3 w-full rounded shimmer" />
-          <div className="h-3 w-4/5 rounded shimmer" />
-        </div>
-      )}
-
       {failed && (
-        <p className="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
-          The advisory service did not respond. Please try again.
+        <p className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
+          {t('askError')}
         </p>
-      )}
-
-      {answer && (
-        <div className="animate-fade-up mt-3 rounded-lg border border-slate-200 bg-gradient-to-b from-white to-slate-50/70 p-3">
-          <div className="scroll-slim max-h-72 overflow-y-auto pr-1">
-            <Advisory text={answer} />
-          </div>
-          {meta?.observedAt && (
-            <div className="mt-2 border-t border-slate-100 pt-2 font-mono text-[9.5px] text-slate-400">
-              {meta.live ? `${t('observed')} ${meta.observedAt}Z` : 'no live feed'}
-              {meta.sources?.length ? ` · ${meta.sources.join(', ')}` : ''}
-            </div>
-          )}
-        </div>
       )}
     </section>
   )
