@@ -11,7 +11,8 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
 })
 
-const darkTileLayer = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png'
+// High-resolution public satellite imagery (No API key required, no watermarks)
+const satelliteTileLayer = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
 
 const MapView = ({ alerts = [] }) => {
   const defaultCenter = [15.0, 82.0] // Bay of Bengal & Indian Ocean center
@@ -34,8 +35,8 @@ const MapView = ({ alerts = [] }) => {
       style={{ height: '100%', width: '100%' }}
     >
       <TileLayer
-        attribution='&copy; <a href="https://carto.com/">CARTO</a>'
-        url={darkTileLayer}
+        attribution='Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
+        url={satelliteTileLayer}
       />
       {alerts.map((alert, index) => {
         const pos = getPosition(alert)
