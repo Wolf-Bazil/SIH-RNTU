@@ -12,7 +12,11 @@ import 'leaflet/dist/leaflet.css'
 //
 // `reference` is Esri's label-only transparent layer, drawn above the data so
 // place names stay readable.
-const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services'
+// Served through our own nginx (see nginx.conf `location /tiles/`) rather than
+// hit directly. A direct third-party request to arcgisonline.com is blocked by
+// browser tracking protection and by corporate filters, which leaves the map
+// blank; proxying keeps it first-party and adds a 30-day tile cache.
+const ESRI = '/tiles'
 
 const BASEMAPS = {
   light: {
