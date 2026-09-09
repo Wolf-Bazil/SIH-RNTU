@@ -15,7 +15,10 @@ function App() {
       eventSource.addEventListener('alert', (e) => {
         try {
           const alert = JSON.parse(e.data)
-          setAlerts((prev) => [alert, ...prev.slice(0, 19)])
+          setAlerts((prev) => {
+            const filtered = prev.filter((a) => a.type !== alert.type)
+            return [alert, ...filtered]
+          })
         } catch (err) {
           console.error('Error parsing SSE alert', err)
         }

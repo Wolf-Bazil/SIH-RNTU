@@ -38,7 +38,7 @@ function AskPanel({ language }) {
         {loading ? 'Processing...' : language === 'hi' ? 'पूछें' : 'Ask'}
       </button>
       {answer && (
-        <div className="mt-3 p-3 bg-maritime-600 rounded text-sm text-gray-200">
+        <div className="mt-3 p-3 bg-maritime-900/80 border border-maritime-600 rounded text-xs text-gray-200 whitespace-pre-wrap leading-relaxed max-h-96 overflow-y-auto font-sans shadow-inner">
           {answer}
         </div>
       )}
