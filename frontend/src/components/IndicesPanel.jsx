@@ -23,6 +23,8 @@ export default function IndicesPanel({ data, t }) {
   const ci = data?.met?.mean_ci_pfz
   const pfz = data?.pfz
   const outlook = data?.hazard?.next_24h
+  const confidence = data?.satellite?.confidence
+  const missing = data?.satellite?.drivers_missing
 
   const pfzTone =
     pfz?.band === 'high' ? '#0d9488' : pfz?.band === 'moderate' ? '#d97706' : '#dc2626'
@@ -40,6 +42,20 @@ export default function IndicesPanel({ data, t }) {
         <Gauge value={pfz?.score} label={t('pfz')} caption={pfz?.band || '—'} size={96}
                tone={pfz?.band ? pfzTone : 'auto'} />
       </div>
+
+      {/* An index computed from a subset of its drivers must not read as
+          confidently as a complete one. */}
+      {confidence != null && confidence < 1 && (
+        <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2">
+          <span className="mt-0.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" />
+          <p className="text-[10.5px] leading-relaxed text-amber-800">
+            Partial data: {Math.round(confidence * 100)}% of the hazard model had a
+            live reading
+            {missing?.length ? ` (missing ${missing.join(', ')})` : ''}. Treat these
+            indices as provisional.
+          </p>
+        </div>
+      )}
 
       {pfz?.recommendation && (
         <div className="mt-3 rounded-lg border border-abyss-100 bg-abyss-50/60 px-3 py-2 text-[11px] font-medium text-abyss-800">

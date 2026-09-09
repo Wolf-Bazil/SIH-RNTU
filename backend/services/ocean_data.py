@@ -40,6 +40,14 @@ DEFAULT_LON = 83.5
 # The upstream data changes every 15 minutes, so a shorter TTL only adds
 # latency and load without adding information.
 _CACHE_TTL_SECONDS = 600
+
+# A response missing one of its two sources is cached only briefly. Caching a
+# partial reading for the full TTL let a single transient timeout blank the
+# wind, pressure and rainfall panels for ten minutes, and left the hazard
+# index resting on sea surface temperature alone.
+_PARTIAL_CACHE_TTL_SECONDS = 45
+
+_EXPECTED_SOURCES = 2
 _cache: Dict[Tuple[float, float], Tuple[float, Dict[str, Any]]] = {}
 _cache_lock = asyncio.Lock()
 
@@ -74,11 +82,16 @@ async def fetch_observations(lat: float = DEFAULT_LAT,
 
     async with _cache_lock:
         hit = _cache.get(key)
-        if hit and (time.time() - hit[0]) < _CACHE_TTL_SECONDS:
-            return hit[1]
+        if hit:
+            age = time.time() - hit[0]
+            complete = len(hit[1].get("sources", [])) >= _EXPECTED_SOURCES
+            ttl = _CACHE_TTL_SECONDS if complete else _PARTIAL_CACHE_TTL_SECONDS
+            if age < ttl:
+                return hit[1]
 
     result: Dict[str, Any] = {
         "live": False,
+        "complete": False,
         "lat": lat,
         "lon": lon,
         "observed_at": None,
@@ -111,12 +124,25 @@ async def fetch_observations(lat: float = DEFAULT_LAT,
     }
 
     try:
-        async with httpx.AsyncClient(timeout=8.0) as client:
+        # 8s was too tight when the SSE rotation and a dashboard refresh
+        # overlapped: one call would time out and the reading came back half
+        # populated. One retry absorbs a transient upstream blip.
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(14.0, connect=6.0),
+            transport=httpx.AsyncHTTPTransport(retries=1),
+        ) as client:
             marine_res, weather_res = await asyncio.gather(
                 client.get(MARINE_URL, params=marine_params),
                 client.get(WEATHER_URL, params=weather_params),
                 return_exceptions=True,
             )
+
+        for label, res in (("marine", marine_res), ("weather", weather_res)):
+            if isinstance(res, Exception):
+                logger.warning("%s feed failed for %s,%s: %s", label, lat, lon, res)
+            elif res.status_code != 200:
+                logger.warning("%s feed returned %s for %s,%s",
+                               label, res.status_code, lat, lon)
 
         if isinstance(marine_res, httpx.Response) and marine_res.status_code == 200:
             current = marine_res.json().get("current", {})
@@ -150,11 +176,19 @@ async def fetch_observations(lat: float = DEFAULT_LAT,
             result["sources"].append("open-meteo-forecast")
 
         result["live"] = bool(result["sources"])
+        result["complete"] = len(result["sources"]) >= _EXPECTED_SOURCES
     except Exception:
         logger.warning("live observation fetch failed for %s,%s", lat, lon, exc_info=True)
 
     if result["live"]:
         async with _cache_lock:
+            # A previous complete reading beats a fresh partial one: better to
+            # serve values a few minutes old than to blank half the dashboard.
+            previous = _cache.get(key)
+            if (not result["complete"] and previous
+                    and previous[1].get("complete")
+                    and (time.time() - previous[0]) < _CACHE_TTL_SECONDS):
+                return previous[1]
             _cache[key] = (time.time(), result)
 
     return result

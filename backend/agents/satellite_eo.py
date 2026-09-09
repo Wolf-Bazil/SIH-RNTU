@@ -83,11 +83,20 @@ class SatelliteEOAgent(BaseAgent):
 
         # Renormalise the weights over whatever drivers came back, so a missing
         # reading does not silently drag the index toward zero.
+        total_weight = sum(w for w, _ in terms.values())
         weight_sum = sum(w for w, _ in available.values())
         H = sum(w * v for w, v in available.values()) / weight_sum
 
+        # How much of the three-term model actually had data behind it. An
+        # index resting on one driver must not be presented as confidently as
+        # one resting on all three.
+        confidence = round(weight_sum / total_weight, 3)
+
         return {
             "mean_hazard": round(float(H), 4),
+            "confidence": confidence,
+            "drivers_used": sorted(available),
+            "drivers_missing": sorted(set(terms) - set(available)),
             "components": {k: round(float(v), 4) for k, (_, v) in available.items()},
             "observed_at": obs.get("observed_at"),
             "location": {"lat": obs.get("lat"), "lon": obs.get("lon")},

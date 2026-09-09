@@ -132,6 +132,7 @@ async def get_overlays(lat: float | None = None, lon: float | None = None):
 
     return {
         "live": obs.get("live", False),
+        "complete": obs.get("complete", False),
         "observed_at": obs.get("observed_at"),
         "sources": obs.get("sources", []),
         "location": {"lat": obs.get("lat"), "lon": obs.get("lon")},
@@ -148,10 +149,14 @@ async def get_overlays(lat: float | None = None, lon: float | None = None):
         "satellite": {
             "mean_hazard": sat.get("mean_hazard"),
             "components": sat.get("components"),
+            "confidence": sat.get("confidence"),
+            "drivers_missing": sat.get("drivers_missing"),
         },
         "met": {
             "mean_ci_pfz": met.get("mean_ci_pfz"),
             "components": met.get("components"),
+            "confidence": met.get("confidence"),
+            "drivers_missing": met.get("drivers_missing"),
         },
         "hazard": {
             "trend": hazard.get("trend"),

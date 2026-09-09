@@ -72,11 +72,16 @@ class MetSentinelAgent(BaseAgent):
                 "detail": "no usable drivers in the observation",
             }
 
+        total_weight = sum(w for w, _ in terms.values())
         weight_sum = sum(w for w, _ in available.values())
         CI = sum(w * v for w, v in available.values()) / weight_sum
+        confidence = round(weight_sum / total_weight, 3)
 
         return {
             "mean_ci_pfz": round(float(CI), 4),
+            "confidence": confidence,
+            "drivers_used": sorted(available),
+            "drivers_missing": sorted(set(terms) - set(available)),
             "components": {k: round(float(v), 4) for k, (_, v) in available.items()},
             "observed_at": obs.get("observed_at"),
             "raw": {
