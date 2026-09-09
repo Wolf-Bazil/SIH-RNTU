@@ -9,9 +9,10 @@ from backend.agents.dispatcher import DispatcherAgent
 import re
 from dotenv import load_dotenv
 
-# Ensure environment variables are loaded
+# Ensure environment variables are loaded. In containers the values arrive
+# through the process environment (env_file), and load_dotenv never overrides
+# those. env.txt is a duplicate of .env and is deliberately not read.
 load_dotenv('.env')
-load_dotenv('env.txt')
 
 logger = logging.getLogger("orca.ask")
 router = APIRouter()
@@ -167,5 +168,10 @@ async def ask_endpoint(req: AskRequest):
         return {"answer": ans, "telemetry": telemetry_summary, "location": city_info}
 
     except Exception as e:
-        logger.error(f"Error in ask_endpoint: {e}")
-        return {"answer": f"ORCA telemetry online. Current hazard level nominal. Systems fully operational."}
+        # Do not report a healthy-looking advisory when the pipeline failed —
+        # a fake "hazard level nominal" reply is worse than an explicit error.
+        logger.exception("Error in ask_endpoint")
+        raise HTTPException(
+            status_code=503,
+            detail="ORCA advisory pipeline is temporarily unavailable."
+        ) from e

@@ -13,10 +13,15 @@ load_dotenv()
 
 app = FastAPI(title="ORCA – Oceanic Risk & Cyclone Advisory System", version="1.0.0")
 
+# Browsers reject `Access-Control-Allow-Origin: *` together with credentials, so
+# the wildcard and credentials cannot both be enabled. Set CORS_ORIGINS to a
+# comma-separated allowlist (e.g. "https://orca.example.com") in production.
+_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_origins or ["*"],
+    allow_credentials=bool(_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -95,15 +100,49 @@ async def stream_alerts(request: Request):
 
 @app.get("/api/overlays")
 async def get_overlays():
-    """Returns spatial overlay telemetry from active agent engines."""
-    sat = await dispatcher.process({"agent": "satellite_eo", "data": {}})
-    pfz = await dispatcher.process({"agent": "pfz_reasoner", "data": {}})
-    hazard = await dispatcher.process({"agent": "hazard_forecaster", "data": {}})
-    route = await dispatcher.process({"agent": "eco_route_planner", "data": {}})
-    
+    """Returns spatial overlay telemetry from active agent engines.
+
+    The agents are chained: the satellite grid feeds the PFZ reasoner and the
+    forecaster, which previously received empty input and returned nothing.
+    Only summary scalars are returned; the raw 100x100 grids stay server-side
+    so the response is a few hundred bytes instead of several megabytes.
+    """
+    sat = (await dispatcher.process({"agent": "satellite_eo", "data": {}})).get("result", {})
+    met = (await dispatcher.process({"agent": "met_sentinel", "data": {}})).get("result", {})
+
+    pfz = (await dispatcher.process({
+        "agent": "pfz_reasoner",
+        "data": {"hazard_index": sat.get("hazard_index", []), "ci_pfz": met.get("ci_pfz", [])}
+    })).get("result", {})
+
+    hazard = (await dispatcher.process({
+        "agent": "hazard_forecaster",
+        "data": {"hazard_index": sat.get("hazard_index", [])}
+    })).get("result", {})
+
+    route = (await dispatcher.process({"agent": "eco_route_planner", "data": {}})).get("result", {})
+
     return {
-        "satellite": sat.get("result", {}),
-        "pfz": pfz.get("result", {}),
-        "hazard": hazard.get("result", {}),
-        "eco_route": route.get("result", {})
+        "satellite": {
+            "mean_hazard": sat.get("mean_hazard"),
+            "max_hazard": sat.get("max_hazard"),
+            "min_hazard": sat.get("min_hazard"),
+        },
+        "met": {
+            "mean_ci_pfz": met.get("mean_ci_pfz"),
+            "max_ci_pfz": met.get("max_ci_pfz"),
+        },
+        "pfz": {
+            "flood_zone_percentage": pfz.get("flood_zone_percentage"),
+        },
+        "hazard": {
+            "mean_forecast": hazard.get("mean_forecast"),
+            "trend": hazard.get("trend"),
+        },
+        "eco_route": {
+            "path": route.get("path", []),
+            "path_length": route.get("path_length"),
+            "total_cost_J_route": route.get("total_cost_J_route"),
+            "found": route.get("found"),
+        },
     }

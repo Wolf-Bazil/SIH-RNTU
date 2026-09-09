@@ -23,8 +23,19 @@ class HazardForecasterAgent(BaseAgent):
         # H(t+1) = H(t) + η * (H(t) - H(t-1))
         H_forecast = H_current + self.eta * (H_current - H_previous)
 
+        mean_forecast = float(np.mean(H_forecast))
+        mean_current = float(np.mean(H_current))
+
+        # When no previous frame is supplied H_previous == H_current, so the
+        # forecast equals the current state. That is "stable", not "decreasing".
+        delta = mean_forecast - mean_current
+        if abs(delta) < 1e-9:
+            trend = "stable"
+        else:
+            trend = "increasing" if delta > 0 else "decreasing"
+
         return {
             "forecast": H_forecast.tolist(),
-            "mean_forecast": float(np.mean(H_forecast)),
-            "trend": "increasing" if np.mean(H_forecast) > np.mean(H_current) else "decreasing"
+            "mean_forecast": mean_forecast,
+            "trend": trend
         }

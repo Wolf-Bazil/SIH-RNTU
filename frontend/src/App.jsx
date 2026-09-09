@@ -51,7 +51,7 @@ function App() {
         </div>
         <div className="w-1/4 flex flex-col border-l border-maritime-700 bg-maritime-800 p-3 gap-3 overflow-y-auto">
           <AlertPanel alerts={alerts} language={language} />
-          <AskPanel onAlertsUpdate={setAlerts} language={language} />
+          <AskPanel language={language} />
         </div>
       </div>
     </div>

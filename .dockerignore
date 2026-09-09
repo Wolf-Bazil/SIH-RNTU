@@ -1,0 +1,27 @@
+# Secrets - never bake into an image
+.env
+.env.*
+env.txt
+
+# VCS / editor
+.git
+.gitignore
+.vscode
+.idea
+.aider*
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+*.egg-info/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+node_modules/
+
+# Docs / local compose overrides
+README.md
+docker-compose.override.yml
