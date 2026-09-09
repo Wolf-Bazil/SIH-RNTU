@@ -1,61 +1,108 @@
-import React, { useState, useEffect } from 'react'
-import MapView from './components/MapView'
-import AskPanel from './components/AskPanel'
+import React, { useEffect, useMemo, useState } from 'react'
 import AlertPanel from './components/AlertPanel'
-import LanguageToggle from './components/LanguageToggle'
+import AskPanel from './components/AskPanel'
+import ConditionsPanel from './components/ConditionsPanel'
+import ErrorBoundary from './components/ErrorBoundary'
+import ExplanationPanel from './components/ExplanationPanel'
+import IndicesPanel from './components/IndicesPanel'
+import MapView from './components/MapView'
+import TopBar from './components/TopBar'
+import { useAlertStream, useOverlays, useStations } from './hooks/useLiveData'
+import { useT } from './i18n'
 
-function App() {
-  const [alerts, setAlerts] = useState([])
+export default function App() {
   const [language, setLanguage] = useState('en')
+  const [station, setStation] = useState(null)
+  // The map should open on the whole basin and only zoom in once the user has
+  // actually chosen a station, not because the first one was auto-selected.
+  const [userPicked, setUserPicked] = useState(false)
 
+  const pickStation = (next) => {
+    setUserPicked(true)
+    setStation(next)
+  }
+
+  const stations = useStations()
+  const { alerts, connected } = useAlertStream()
+  const { data, status, refresh } = useOverlays(station)
+  const t = useT(language)
+
+  // Default to the first station once the catalogue arrives.
   useEffect(() => {
-    let eventSource
-    try {
-      eventSource = new EventSource('/api/alerts/stream')
-      eventSource.addEventListener('alert', (e) => {
-        try {
-          const alert = JSON.parse(e.data)
-          setAlerts((prev) => {
-            const filtered = prev.filter((a) => a.type !== alert.type)
-            return [alert, ...filtered]
-          })
-        } catch (err) {
-          console.error('Error parsing SSE alert', err)
-        }
-      })
-    } catch (e) {
-      console.error('Failed to connect to SSE stream', e)
-    }
-    return () => {
-      if (eventSource) eventSource.close()
-    }
-  }, [])
+    if (!station && stations.length) setStation(stations[0])
+  }, [stations, station])
+
+  const observedAt = useMemo(
+    () => data?.observed_at?.replace('T', ' ') ?? null,
+    [data?.observed_at]
+  )
+
+  const focusAlert = (alert) => {
+    const match = stations.find((s) => s.name === alert.station)
+    if (match) pickStation(match)
+  }
 
   return (
-    <div className="flex flex-col h-screen bg-maritime-900 text-white font-sans">
-      <header className="bg-maritime-800 border-b border-maritime-700 px-6 py-3 flex justify-between items-center shadow-lg">
-        <div className="flex items-center gap-3">
-          <span className="text-2xl font-black tracking-wider text-blue-400">ORCA</span>
-          <span className="text-xs bg-maritime-700 text-maritime-200 px-2 py-1 rounded border border-maritime-600 font-mono">
-            SIH 2026 PS 176
-          </span>
-          <span className="text-sm text-gray-300 hidden md:inline">Oceanic Risk & Cyclone Advisory System</span>
+    <div className="flex h-full flex-col bg-[#f6f8fa]">
+      <TopBar
+        status={status}
+        observedAt={observedAt}
+        stations={stations}
+        station={station}
+        onStationChange={pickStation}
+        language={language}
+        onLanguageChange={setLanguage}
+        onRefresh={refresh}
+        t={t}
+      />
+
+      <main className="flex min-h-0 flex-1 flex-col lg:flex-row">
+        {/* Map. Fixed height on small screens so the rails stay reachable. */}
+        <div className="relative h-[46vh] shrink-0 border-b border-slate-200 lg:h-auto lg:min-h-0 lg:flex-1 lg:border-b-0 lg:border-r">
+          <ErrorBoundary label="The map">
+            <MapView
+              alerts={alerts}
+              stations={stations}
+              station={station}
+              overlays={data}
+              followStation={userPicked}
+              onSelectStation={pickStation}
+            />
+          </ErrorBoundary>
         </div>
-        <div className="w-56">
-          <LanguageToggle language={language} onLanguageChange={setLanguage} />
-        </div>
-      </header>
-      <div className="flex flex-1 overflow-hidden">
-        <div className="w-3/4 relative h-full">
-          <MapView alerts={alerts} />
-        </div>
-        <div className="w-1/4 flex flex-col border-l border-maritime-700 bg-maritime-800 p-3 gap-3 overflow-y-auto">
-          <AlertPanel alerts={alerts} language={language} />
-          <AskPanel language={language} />
-        </div>
-      </div>
+
+        {/* Telemetry rail. */}
+        <aside className="scroll-slim min-h-0 w-full shrink-0 space-y-3 overflow-y-auto bg-[#f6f8fa] p-3 lg:w-[340px] xl:w-[380px]">
+          <ErrorBoundary label="Sea state">
+            <ConditionsPanel data={data} t={t} />
+          </ErrorBoundary>
+          <ErrorBoundary label="Indices">
+            <IndicesPanel data={data} t={t} />
+          </ErrorBoundary>
+          <ErrorBoundary label="The explanation">
+            <ExplanationPanel data={data} t={t} />
+          </ErrorBoundary>
+        </aside>
+
+        {/* Interaction rail. */}
+        <aside className="scroll-slim flex min-h-0 w-full shrink-0 flex-col gap-3 overflow-y-auto border-slate-200 bg-white/60 p-3 lg:w-[330px] lg:border-l xl:w-[360px]">
+          <ErrorBoundary label="Ask ORCA">
+            <AskPanel language={language} station={station} t={t} />
+          </ErrorBoundary>
+          <ErrorBoundary label="The alert feed">
+            <AlertPanel alerts={alerts} connected={connected} t={t} onFocus={focusAlert} />
+          </ErrorBoundary>
+        </aside>
+      </main>
+
+      <footer className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-1.5 text-[10px] text-slate-400 sm:px-6">
+        <span>
+          ORCA · Multi-agent marine reasoning · Smart India Hackathon 2026, PS 176
+        </span>
+        <span className="hidden font-mono sm:inline">
+          {data?.sources?.length ? data.sources.join(' · ') : 'awaiting feed'}
+        </span>
+      </footer>
     </div>
   )
 }
-
-export default App

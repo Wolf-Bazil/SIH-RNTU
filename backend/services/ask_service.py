@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Any, Dict, Optional
 from backend.agents.dispatcher import DispatcherAgent
+from backend.services.ocean_data import fetch_observations
 
 import re
 from dotenv import load_dotenv
@@ -66,6 +67,11 @@ class AskRequest(BaseModel):
     language: Optional[str] = "en"
     agent: Optional[str] = None
     data: Optional[Dict[str, Any]] = None
+    # The station the user is currently looking at. Used when the question
+    # names no place, so the advisory describes the same water the dashboard
+    # is showing instead of a fixed default point.
+    lat: Optional[float] = None
+    lon: Optional[float] = None
 
 @router.post("/ask")
 async def ask_endpoint(req: AskRequest):
@@ -80,17 +86,26 @@ async def ask_endpoint(req: AskRequest):
         question = req.question or "Current oceanic risk advisory"
         lang = req.language or "en"
 
-        # 1. Fetch live agent calculation telemetry
-        sat_data = await dispatcher.process({"agent": "satellite_eo", "data": {}})
-        met_data = await dispatcher.process({"agent": "met_sentinel", "data": {}})
-        hazard_data = await dispatcher.process({"agent": "hazard_forecaster", "data": {}})
-
-        mean_h = sat_data.get("result", {}).get("mean_hazard", 0.38)
-        ci_pfz = met_data.get("result", {}).get("mean_ci_pfz", 0.72)
-        trend = hazard_data.get("result", {}).get("trend", "stable")
-
-        # 2. Fetch live city ground truth
+        # 1. Resolve the place first, so the agents report on the location the
+        #    user actually asked about rather than a fixed default point.
         city_info = await fetch_hyperlocal_telemetry(question)
+
+        if city_info.get("found"):
+            obs = await fetch_observations(city_info["lat"], city_info["lon"])
+        elif req.lat is not None and req.lon is not None:
+            obs = await fetch_observations(req.lat, req.lon)
+        else:
+            obs = await fetch_observations()
+
+        # 2. Run the agents on that single shared observation.
+        agent_input = {"observations": obs}
+        sat_data = await dispatcher.process({"agent": "satellite_eo", "data": agent_input})
+        met_data = await dispatcher.process({"agent": "met_sentinel", "data": agent_input})
+        hazard_data = await dispatcher.process({"agent": "hazard_forecaster", "data": agent_input})
+
+        mean_h = sat_data.get("result", {}).get("mean_hazard")
+        ci_pfz = met_data.get("result", {}).get("mean_ci_pfz")
+        trend = hazard_data.get("result", {}).get("trend", "unknown")
 
         loc_context = ""
         if city_info.get("found"):
@@ -99,12 +114,54 @@ async def ask_endpoint(req: AskRequest):
                 f"Local Observations: Temperature {city_info['temp']}°C, Humidity {city_info['humidity']}%, "
                 f"Surface Wind {city_info['wind']} km/h, Precipitation {city_info['rain']} mm.\n"
             )
+        elif req.lat is not None and req.lon is not None:
+            # No place named, so say plainly which water this describes rather
+            # than leaving the model to guess at a district.
+            loc_context = (
+                f"No place name was given. These readings are for the monitored "
+                f"offshore point at {req.lat}°N, {req.lon}°E in the Indian EEZ.\n"
+            )
 
-        telemetry_summary = (
-            f"{loc_context}"
-            f"Coastal & Oceanic Radar: Mean Hazard Index H(x,y,t)={mean_h:.3f}, "
-            f"Critical Flood Index CI_PFZ={ci_pfz:.3f}, Forecast Trend={trend}."
-        )
+        if obs.get("live"):
+            sea_bits = []
+            if obs.get("sst") is not None:
+                sea_bits.append(f"SST {obs['sst']:.1f}°C")
+            if obs.get("wave_height") is not None:
+                sea_bits.append(f"significant wave height {obs['wave_height']:.1f} m")
+            if obs.get("wave_period") is not None:
+                sea_bits.append(f"wave period {obs['wave_period']:.0f} s")
+            if obs.get("pressure") is not None:
+                sea_bits.append(f"MSL pressure {obs['pressure']:.0f} hPa")
+            if obs.get("wind_gusts") is not None:
+                sea_bits.append(f"gusts {obs['wind_gusts']:.0f} km/h")
+
+            indices = []
+            if mean_h is not None:
+                indices.append(f"Mean Hazard Index H(x,y,t)={mean_h:.3f}")
+            if ci_pfz is not None:
+                indices.append(f"Critical Index CI_PFZ={ci_pfz:.3f}")
+            indices.append(f"Forecast Trend={trend}")
+
+            outlook = hazard_data.get("result", {}).get("next_24h") or {}
+            outlook_text = ""
+            if outlook:
+                outlook_text = (
+                    f"\n24h outlook: peak rainfall {outlook.get('peak_precipitation_mm')} mm/h, "
+                    f"peak wind {outlook.get('peak_wind_kmh')} km/h."
+                )
+
+            telemetry_summary = (
+                f"{loc_context}"
+                f"Sea state ({', '.join(obs.get('sources', []))}, observed {obs.get('observed_at')} UTC): "
+                f"{', '.join(sea_bits)}.\n"
+                f"Derived indices: {', '.join(indices)}.{outlook_text}"
+            )
+        else:
+            telemetry_summary = (
+                f"{loc_context}"
+                "Sea state: live marine feed unavailable for this request; "
+                "no oceanic indices were computed."
+            )
 
         api_key = os.getenv("DEEPSEEK_API_KEY") or os.getenv("OPENAI_API_KEY")
         base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepinfra.com/v1/openai")
@@ -120,6 +177,11 @@ async def ask_endpoint(req: AskRequest):
                     "🌤️ Current Weather (Temperature, Rain, Wind in simple everyday terms)\n"
                     "🌊 Oceanic & Cyclone Risk (Clear explanation of any cyclone, storm, or surge risk)\n"
                     "🛡️ Simple Safety Advisory (Practical, straightforward advice for local citizens, farmers, or fishermen)\n\n"
+                    "Ground every statement in the telemetry you are given. Do not invent "
+                    "measurements, cyclone names, or warnings that the telemetry does not "
+                    "support. If the telemetry says a feed was unavailable, say so plainly "
+                    "rather than estimating. If all readings are within normal limits, say "
+                    "conditions are normal instead of manufacturing a risk.\n\n"
                     f"IMPORTANT: Respond completely in the requested language code: '{lang}' (e.g. if 'hi' use natural Hindi, if 'ta' Tamil, if 'bn' Bengali, if 'en' English)."
                 )
 
@@ -138,34 +200,99 @@ async def ask_endpoint(req: AskRequest):
                     )
                     if resp.status_code == 200:
                         content = resp.json()["choices"][0]["message"]["content"]
-                        return {"answer": content, "telemetry": telemetry_summary, "location": city_info}
+                        return {
+                            "answer": content,
+                            "telemetry": telemetry_summary,
+                            "location": city_info,
+                            "live": obs.get("live", False),
+                            "observed_at": obs.get("observed_at"),
+                            "sources": obs.get("sources", []),
+                        }
             except Exception as llm_err:
                 logger.warning(f"LLM request error: {llm_err}")
 
-        # Structured deterministic fallback
+        # Structured deterministic fallback, used when no LLM key is set or the
+        # LLM call fails. Every line below is derived from the readings; it
+        # never asserts that conditions are safe without checking them.
         if city_info.get("found"):
             target_city = f"{city_info['city']}, {city_info['state']}"
-            weather_desc = f"Temperature is {city_info['temp']}°C with wind speed at {city_info['wind']} km/h and humidity of {city_info['humidity']}%."
+            weather_desc = (
+                f"Temperature is {city_info['temp']}°C with wind speed at "
+                f"{city_info['wind']} km/h and humidity of {city_info['humidity']}%."
+            )
         else:
             target_city = question
-            weather_desc = f"Maritime surface conditions: Moderate SST gradients, wind speeds averaging 15-20 knots."
+            weather_desc = "No matching place was found, so no local weather was retrieved."
+
+        risk_lines = []
+        advisory_lines = []
+
+        if obs.get("live"):
+            if mean_h is not None:
+                risk_lines.append(f"- **Hazard Index H(x,y,t):** {mean_h:.2f} (trend: {trend})")
+            if ci_pfz is not None:
+                risk_lines.append(f"- **Critical Index CI_PFZ:** {ci_pfz:.2f}")
+            if obs.get("sst") is not None:
+                risk_lines.append(f"- **Sea surface temperature:** {obs['sst']:.1f} °C")
+            if obs.get("wave_height") is not None:
+                risk_lines.append(f"- **Significant wave height:** {obs['wave_height']:.1f} m")
+            if obs.get("pressure") is not None:
+                risk_lines.append(f"- **Mean sea level pressure:** {obs['pressure']:.0f} hPa")
+
+            wave = obs.get("wave_height")
+            wind = obs.get("wind_speed")
+            rain = obs.get("precipitation")
+
+            if wave is not None and wave >= 3.0:
+                advisory_lines.append(
+                    f"- Waves are running {wave:.1f} m. Do not put out to sea; "
+                    f"this is above the INCOIS high wave warning level.")
+            elif wave is not None and wave >= 2.0:
+                advisory_lines.append(
+                    f"- Waves are {wave:.1f} m. Small and artisanal craft should stay ashore.")
+
+            if wind is not None and wind >= 62:
+                advisory_lines.append(
+                    f"- Wind is {wind:.0f} km/h, cyclonic storm strength. Follow local "
+                    f"evacuation instructions.")
+            elif wind is not None and wind >= 40:
+                advisory_lines.append(f"- Wind is {wind:.0f} km/h. Secure loose structures.")
+
+            if rain is not None and rain >= 7.5:
+                advisory_lines.append(
+                    f"- Rainfall is {rain:.1f} mm/h, heavy. Expect local waterlogging.")
+
+            if not advisory_lines:
+                advisory_lines.append(
+                    "- All measured values are within normal limits. No warning is in force "
+                    "for this location right now.")
+            advisory_lines.append(
+                f"- Readings observed {obs.get('observed_at')} UTC via "
+                f"{', '.join(obs.get('sources', []))}.")
+        else:
+            risk_lines.append("- Live marine data could not be retrieved for this request.")
+            advisory_lines.append(
+                "- No advisory can be issued without data. Check IMD and INCOIS bulletins directly.")
 
         ans = (
             f"### 📍 Location Context\n"
-            f"**Area:** {target_city}\n"
-            f"- Classification: Monitored zone under ORCA multi-agent telemetry.\n\n"
+            f"**Area:** {target_city}\n\n"
             f"### 🌤️ Current Weather\n"
             f"- {weather_desc}\n\n"
             f"### 🌊 Oceanic & Cyclone Risk\n"
-            f"- **Hazard Index H(x,y,t):** {mean_h:.2f} (Status: {trend.capitalize()})\n"
-            f"- **Potential Flood / Surge Index CI_PFZ:** {ci_pfz:.2f}\n"
-            f"- Coastal convective systems are within safe thresholds; inland rainbands are minimal.\n\n"
+            + "\n".join(risk_lines) + "\n\n"
             f"### 🛡️ Simple Safety Advisory\n"
-            f"- Conditions are safe for normal daily activities.\n"
-            f"- Coastal vessels should follow standard port advisories; inland water levels remain normal."
+            + "\n".join(advisory_lines)
         )
 
-        return {"answer": ans, "telemetry": telemetry_summary, "location": city_info}
+        return {
+            "answer": ans,
+            "telemetry": telemetry_summary,
+            "location": city_info,
+            "live": obs.get("live", False),
+            "observed_at": obs.get("observed_at"),
+            "sources": obs.get("sources", []),
+        }
 
     except Exception as e:
         # Do not report a healthy-looking advisory when the pipeline failed —

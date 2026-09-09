@@ -1,166 +1,277 @@
-import React from 'react'
-import { MapContainer, TileLayer, Marker, Popup, Polygon, Polyline, Circle } from 'react-leaflet'
+import React, { useMemo, useState } from 'react'
+import {
+  Circle, MapContainer, Marker, Polyline, Popup, TileLayer, ZoomControl, useMap,
+} from 'react-leaflet'
 import L from 'leaflet'
 import 'leaflet/dist/leaflet.css'
 
-// Fix Leaflet marker icon asset loading in Vite
-delete L.Icon.Default.prototype._getIconUrl
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
-})
+// Low-chroma basemaps so the data layers carry the colour rather than the
+// tiles. All three are Esri's public tile services: keyless, no API key
+// watermark, and no usage token. CARTO's light_all was the obvious choice for
+// the light theme but now stamps "API KEY REQUIRED" across every tile.
+//
+// `reference` is Esri's label-only transparent layer, drawn above the data so
+// place names stay readable.
+const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services'
 
-// High-resolution public satellite imagery (No API key required, no watermarks)
-const satelliteTileLayer = 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
+const BASEMAPS = {
+  light: {
+    label: 'Light',
+    url: `${ESRI}/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}`,
+    reference: `${ESRI}/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}`,
+    attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin',
+  },
+  ocean: {
+    label: 'Ocean',
+    url: `${ESRI}/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}`,
+    reference: `${ESRI}/Ocean/World_Ocean_Reference/MapServer/tile/{z}/{y}/{x}`,
+    attribution: 'Tiles &copy; Esri &mdash; GEBCO, NOAA, and other contributors',
+  },
+  satellite: {
+    label: 'Satellite',
+    url: `${ESRI}/World_Imagery/MapServer/tile/{z}/{y}/{x}`,
+    reference: null,
+    attribution: 'Tiles &copy; Esri &mdash; Maxar, Earthstar Geographics',
+  },
+}
 
-const MapView = ({ alerts = [] }) => {
-  const defaultCenter = [14.0, 83.5] // Centered on Bay of Bengal & Indian coastline
-  const defaultZoom = 5
+const SEVERITY_COLOR = {
+  high: '#dc2626',
+  medium: '#d97706',
+  low: '#0d9488',
+}
 
-  const getPosition = (alert) => {
-    if (alert.lat !== undefined && alert.lng !== undefined) {
-      return [alert.lat, alert.lng]
+/** Pulsing dot, built as a divIcon so it can be animated with CSS. */
+function pulseIcon(color, active) {
+  return L.divIcon({
+    className: '',
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+    html: `<div class="station-marker">
+             ${active ? `<span class="ring" style="background:${color}"></span>` : ''}
+             <span class="dot" style="background:${color}"></span>
+           </div>`,
+  })
+}
+
+/**
+ * Eases the map to a new centre whenever the selected station changes.
+ *
+ * Guarded on two counts. Leaflet computes a flight path from the container's
+ * pixel size, so calling flyTo while the flex layout still reports a zero-size
+ * container produces an "Invalid LatLng object: (NaN, NaN)" throw that takes
+ * the whole tree down. The first position is also skipped, because
+ * MapContainer has already been initialised at that centre.
+ */
+function FlyTo({ position, zoom }) {
+  const map = useMap()
+  const isFirst = React.useRef(true)
+  const lat = position?.[0]
+  const lon = position?.[1]
+
+  React.useEffect(() => {
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return undefined
+    if (isFirst.current) {
+      isFirst.current = false
+      return undefined
     }
-    if (Array.isArray(alert.coordinates) && alert.coordinates.length >= 2) {
-      return [alert.coordinates[1], alert.coordinates[0]]
-    }
-    return null
-  }
 
+    let frame = 0
+    const run = () => {
+      const size = map.getSize()
+      if (!size || size.x === 0 || size.y === 0) {
+        // Layout has not settled yet; retry on the next frame.
+        frame = requestAnimationFrame(run)
+        return
+      }
+      map.flyTo([lat, lon], zoom ?? map.getZoom(), { duration: 0.9 })
+    }
+    frame = requestAnimationFrame(run)
+    return () => cancelAnimationFrame(frame)
+  }, [lat, lon, zoom, map])
+
+  return null
+}
+
+/** Leaflet mis-measures inside a flex column until the first paint settles. */
+function ResizeOnMount() {
+  const map = useMap()
+  React.useEffect(() => {
+    const id = setTimeout(() => map.invalidateSize(), 180)
+    const onResize = () => map.invalidateSize()
+    window.addEventListener('resize', onResize)
+    return () => {
+      clearTimeout(id)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [map])
+  return null
+}
+
+function Legend({ basemap, onBasemapChange }) {
   return (
-    <MapContainer
-      center={defaultCenter}
-      zoom={defaultZoom}
-      style={{ height: '100%', width: '100%' }}
-    >
-      <TileLayer
-        attribution='Tiles &copy; Esri &mdash; Source: Esri, Maxar, Earthstar Geographics'
-        url={satelliteTileLayer}
-      />
-
-      {/* 1. Cyclone Hazard Cone (Bay of Bengal) */}
-      <Polygon
-        positions={[
-          [11.5, 84.5],
-          [14.2, 87.8],
-          [17.8, 88.2],
-          [18.5, 85.0],
-          [15.0, 82.8]
-        ]}
-        pathOptions={{
-          color: '#ef4444',
-          fillColor: '#dc2626',
-          fillOpacity: 0.28,
-          weight: 2,
-          dashArray: '5, 5'
-        }}
-      >
-        <Popup>
-          <div className="text-gray-900 font-sans">
-            <strong className="text-red-600 block mb-1">Cyclone Hazard Cone H(x,y,t)</strong>
-            <p className="text-xs m-0">Convective Core: Cloud Top &lt; -74°C | Wind: 52 kt</p>
-            <span className="inline-block mt-1 text-xs px-2 py-0.5 rounded bg-red-100 text-red-700 font-semibold">
-              SEVERITY: HIGH
-            </span>
-          </div>
-        </Popup>
-      </Polygon>
-
-      {/* 2. Potential Fishing Zone (PFZ Chlorophyll Front) */}
-      <Circle
-        center={[11.2, 80.6]}
-        radius={75000}
-        pathOptions={{
-          color: '#10b981',
-          fillColor: '#059669',
-          fillOpacity: 0.32,
-          weight: 2
-        }}
-      >
-        <Popup>
-          <div className="text-gray-900 font-sans">
-            <strong className="text-emerald-600 block mb-1">Potential Fishing Zone (PFZ)</strong>
-            <p className="text-xs m-0">Chlorophyll Gradient: 3.4 mg/m³ | CI_PFZ: 0.88</p>
-            <span className="inline-block mt-1 text-xs px-2 py-0.5 rounded bg-emerald-100 text-emerald-700 font-semibold">
-              RECOMMENDED HARVEST
-            </span>
-          </div>
-        </Popup>
-      </Circle>
-
-      {/* 3. Modified A* Eco-Route (Chennai to Port Blair avoiding Cyclone) */}
-      <Polyline
-        positions={[
-          [13.08, 80.27], // Chennai
-          [11.8, 82.5],
-          [10.5, 86.2],
-          [10.8, 90.0],
-          [11.66, 92.73]  // Port Blair
-        ]}
-        pathOptions={{
-          color: '#06b6d4',
-          weight: 3,
-          dashArray: '6, 6'
-        }}
-      >
-        <Popup>
-          <div className="text-gray-900 font-sans">
-            <strong className="text-cyan-600 block mb-1">Eco-Route J_route (Modified A*)</strong>
-            <p className="text-xs m-0">Optimized Fuel Burn: -17.4% | Storm Margin: &gt; 180 NM</p>
-          </div>
-        </Popup>
-      </Polyline>
-
-      {/* 4. IMBL Maritime Boundary Line */}
-      <Polyline
-        positions={[
-          [10.2, 79.9],
-          [9.7, 79.6],
-          [9.2, 79.3],
-          [8.8, 79.0],
-          [8.2, 78.8]
-        ]}
-        pathOptions={{
-          color: '#f59e0b',
-          weight: 2,
-          dashArray: '8, 4'
-        }}
-      >
-        <Popup>
-          <div className="text-gray-900 font-sans">
-            <strong className="text-amber-600 block mb-1">IMBL / EEZ Boundary (Bhuvan)</strong>
-            <p className="text-xs m-0">Automated Geofence: Active | Encroachment: Nil</p>
-          </div>
-        </Popup>
-      </Polyline>
-
-      {/* Live Event Markers */}
-      {alerts.map((alert, index) => {
-        const pos = getPosition(alert)
-        if (!pos) return null
-        return (
-          <Marker key={alert.id || index} position={pos}>
-            <Popup>
-              <div className="text-gray-900 font-sans">
-                <strong className="text-blue-600 block mb-1">{alert.type || 'Alert'}</strong>
-                <p className="text-sm m-0">{alert.message}</p>
-                {alert.severity && (
-                  <span className={`inline-block mt-1 text-xs px-2 py-0.5 rounded font-semibold uppercase ${
-                    alert.severity === 'high' ? 'bg-red-100 text-red-700' :
-                    alert.severity === 'medium' ? 'bg-amber-100 text-amber-700' :
-                    'bg-blue-100 text-blue-700'
-                  }`}>
-                    {alert.severity}
-                  </span>
-                )}
-              </div>
-            </Popup>
-          </Marker>
-        )
-      })}
-    </MapContainer>
+    <div className="pointer-events-auto absolute bottom-4 left-4 z-[500] space-y-2">
+      <div className="card flex overflow-hidden p-0.5">
+        {Object.entries(BASEMAPS).map(([key, b]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onBasemapChange(key)}
+            className={`focusable rounded-lg px-2.5 py-1 text-[10.5px] font-semibold transition-colors ${
+              basemap === key
+                ? 'bg-abyss-700 text-white'
+                : 'text-slate-500 hover:bg-slate-50 hover:text-abyss-700'
+            }`}
+          >
+            {b.label}
+          </button>
+        ))}
+      </div>
+      <div className="card px-3 py-2">
+        <div className="label mb-1.5">Severity</div>
+        <div className="space-y-1">
+          {[['high', 'Warning'], ['medium', 'Advisory'], ['low', 'Nominal']].map(([k, txt]) => (
+            <div key={k} className="flex items-center gap-2 text-[10.5px] text-slate-600">
+              <span className="h-2 w-2 rounded-full" style={{ background: SEVERITY_COLOR[k] }} />
+              {txt}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
   )
 }
 
-export default MapView
+export default function MapView({
+  alerts = [], stations = [], station, overlays, onSelectStation, followStation = false,
+}) {
+  const [basemap, setBasemap] = useState('light')
+  const base = BASEMAPS[basemap]
+
+  const center = useMemo(
+    () => (station ? [station.lat, station.lon] : [15.0, 84.0]),
+    [station?.lat, station?.lon]
+  )
+
+  // One alert per station, so the map shows current state rather than history.
+  const byStation = useMemo(() => {
+    const map = new Map()
+    for (const a of alerts) if (!map.has(a.station)) map.set(a.station, a)
+    return map
+  }, [alerts])
+
+  const hazard = overlays?.satellite?.mean_hazard
+  const routePath = overlays?.eco_route?.path
+
+  return (
+    <div className="relative h-full w-full">
+      <MapContainer
+        center={[15.0, 84.0]}
+        zoom={5}
+        minZoom={3}
+        maxZoom={12}
+        style={{ height: '100%', width: '100%' }}
+        zoomControl={false}
+        attributionControl
+      >
+        <TileLayer key={basemap} url={base.url} attribution={base.attribution} />
+        <ZoomControl position="topright" />
+        <ResizeOnMount />
+        {followStation && <FlyTo position={center} zoom={6} />}
+
+        {/* Hazard footprint around the selected station, radius scaled by the
+            live hazard index so a rising index visibly widens the ring. */}
+        {station && hazard != null && (
+          <Circle
+            center={[station.lat, station.lon]}
+            radius={80000 + hazard * 220000}
+            pathOptions={{
+              color: hazard >= 0.6 ? '#dc2626' : hazard >= 0.35 ? '#d97706' : '#0d9488',
+              fillColor: hazard >= 0.6 ? '#dc2626' : hazard >= 0.35 ? '#d97706' : '#0d9488',
+              fillOpacity: 0.08,
+              weight: 1.5,
+              dashArray: '6 6',
+            }}
+          >
+            <Popup>
+              <div className="font-sans">
+                <strong className="mb-1 block text-abyss-900">Hazard footprint</strong>
+                <p className="m-0 text-slate-600">
+                  H(x,y,t) = {hazard.toFixed(3)} · radius scaled by index
+                </p>
+              </div>
+            </Popup>
+          </Circle>
+        )}
+
+        {/* Modified A* eco-route, projected onto the Bay of Bengal corridor. */}
+        {Array.isArray(routePath) && routePath.length > 1 && (
+          <Polyline
+            positions={routePath
+              .filter((_, i) => i % 3 === 0)
+              .map(([r, c]) => [13.0 - (r / 49) * 3.2, 80.3 + (c / 49) * 12.4])}
+            pathOptions={{ color: '#0369a1', weight: 2.5, opacity: 0.75, dashArray: '8 6' }}
+          >
+            <Popup>
+              <div className="font-sans">
+                <strong className="mb-1 block text-abyss-900">Eco-route (modified A*)</strong>
+                <p className="m-0 text-slate-600">
+                  J_route = {overlays?.eco_route?.total_cost_J_route}
+                </p>
+                <p className="m-0 mt-1 text-[10px] text-slate-400">
+                  Environmental field: {overlays?.eco_route?.environmental_field}
+                </p>
+              </div>
+            </Popup>
+          </Polyline>
+        )}
+
+        {stations.map((s) => {
+          const alert = byStation.get(s.name)
+          const color = alert ? SEVERITY_COLOR[alert.severity] : '#94a3b8'
+          const isSelected = station?.name === s.name
+          return (
+            <Marker
+              key={s.name}
+              position={[s.lat, s.lon]}
+              icon={pulseIcon(color, Boolean(alert) || isSelected)}
+              eventHandlers={{ click: () => onSelectStation?.(s) }}
+            >
+              <Popup>
+                <div className="font-sans">
+                  <strong className="mb-1 block text-abyss-900">{s.name}</strong>
+                  {alert ? (
+                    <>
+                      <div
+                        className="mb-1 inline-block rounded px-1.5 py-0.5 text-[9px] font-bold uppercase"
+                        style={{ background: `${color}1a`, color }}
+                      >
+                        {alert.severity} · {alert.type}
+                      </div>
+                      <p className="m-0 text-slate-600">{alert.message}</p>
+                      {alert.readings && (
+                        <div className="mt-1.5 border-t border-slate-100 pt-1.5 font-mono text-[9.5px] text-slate-500">
+                          SST {alert.readings.sst_c ?? '—'}°C · wave{' '}
+                          {alert.readings.wave_height_m ?? '—'}m · wind{' '}
+                          {alert.readings.wind_speed_kmh ?? '—'}km/h
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <p className="m-0 text-slate-500">Awaiting this station&apos;s next reading.</p>
+                  )}
+                </div>
+              </Popup>
+            </Marker>
+          )
+        })}
+        {/* Labels last, so place names stay legible over the data layers. */}
+        {base.reference && (
+          <TileLayer key={`${basemap}-ref`} url={base.reference} pane="shadowPane" />
+        )}
+      </MapContainer>
+
+      <Legend basemap={basemap} onBasemapChange={setBasemap} />
+    </div>
+  )
+}

@@ -85,7 +85,25 @@ class EcoRoutePlannerAgent(BaseAgent):
     async def process(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         self.log("Computing eco-friendly route using modified A*")
         grid = np.array(input_data.get("grid", np.zeros((50, 50))))
-        env_grid = np.array(input_data.get("environmental_grid", np.random.random((50, 50))))
+
+        if "environmental_grid" in input_data:
+            env_grid = np.array(input_data["environmental_grid"])
+            env_source = "caller-supplied"
+        else:
+            # No live gridded cost surface is wired yet, so the environmental
+            # field is synthesised. It is seeded, so the same request returns
+            # the same route instead of a different one on every call, and it
+            # is scaled by the live hazard index when one is available, so a
+            # rougher sea does raise the routing cost.
+            rng = np.random.default_rng(seed=176)
+            env_grid = rng.random((50, 50))
+            hazard = input_data.get("mean_hazard")
+            if hazard is not None:
+                env_grid = env_grid * (0.5 + float(hazard))
+                env_source = "seeded field scaled by live hazard index"
+            else:
+                env_source = "seeded synthetic field"
+
         start = tuple(input_data.get("start", (0, 0)))
         goal = tuple(input_data.get("goal", (49, 49)))
 
@@ -101,6 +119,8 @@ class EcoRoutePlannerAgent(BaseAgent):
         return {
             "path": path,
             "path_length": len(path),
-            "total_cost_J_route": total_cost,
-            "found": len(path) > 0
+            "total_cost_J_route": round(float(total_cost), 4),
+            "found": len(path) > 0,
+            "environmental_field": env_source,
+            "live": False,
         }
