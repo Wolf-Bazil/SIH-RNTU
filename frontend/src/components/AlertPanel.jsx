@@ -1,16 +1,21 @@
 import React, { useState, useEffect } from 'react'
 
-function AlertPanel({ language }) {
-  const [alerts, setAlerts] = useState([])
+function AlertPanel({ language, alerts: propAlerts }) {
+  const [localAlerts, setLocalAlerts] = useState([])
 
   useEffect(() => {
+    if (propAlerts && propAlerts.length > 0) return
     const eventSource = new EventSource('/api/alerts/stream')
     eventSource.addEventListener('alert', (e) => {
-      const alert = JSON.parse(e.data)
-      setAlerts(prev => [alert, ...prev.slice(0, 9)])
+      try {
+        const alert = JSON.parse(e.data)
+        setLocalAlerts(prev => [alert, ...prev.slice(0, 9)])
+      } catch (err) {}
     })
     return () => eventSource.close()
-  }, [])
+  }, [propAlerts])
+
+  const alerts = (propAlerts && propAlerts.length > 0) ? propAlerts : localAlerts
 
   return (
     <div className="bg-maritime-700 rounded-lg p-4">
