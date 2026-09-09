@@ -1,0 +1,53 @@
+# ORCA production stack for vps1.eteon.net.
+#
+# Isolation from the existing eteon / evolution workloads:
+#   * project name `orca` prefixes every container, network and volume
+#   * a dedicated `orca_net` bridge, not attached to any other stack
+#   * the backend publishes NO host port at all; only the web container is
+#     reachable, and only on 127.0.0.1:8100, which host nginx proxies to
+#   * host port 3000 belongs to eteon.service and 8080 to evolution --
+#     neither is touched
+name: orca
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: backend
+    container_name: orca-backend
+    env_file:
+      - /opt/orca/.env
+    environment:
+      CORS_ORIGINS: "https://orca.eteon.net"
+    expose:
+      - "8000"
+    networks:
+      - orca_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4).status==200 else 1)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  web:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: web
+    container_name: orca-web
+    ports:
+      # Loopback only. Host nginx terminates TLS and proxies here.
+      - "127.0.0.1:8100:80"
+    depends_on:
+      - backend
+    networks:
+      - orca_net
+    restart: unless-stopped
+
+networks:
+  orca_net:
+    name: orca_net
+    driver: bridge
