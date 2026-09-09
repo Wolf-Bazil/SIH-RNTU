@@ -31,7 +31,14 @@ fi
 log "Ensuring the docker compose plugin is present"
 if ! docker compose version >/dev/null 2>&1; then
     apt-get update -qq
-    apt-get install -y docker-compose-plugin
+    # Docker here comes from Ubuntu's own `docker.io` package, which pairs with
+    # `docker-compose-v2`. Docker's upstream repo calls it
+    # `docker-compose-plugin`. Try whichever this host actually offers.
+    if apt-cache show docker-compose-v2 >/dev/null 2>&1; then
+        apt-get install -y docker-compose-v2
+    else
+        apt-get install -y docker-compose-plugin
+    fi
     docker compose version >/dev/null 2>&1 || die "docker compose plugin still unavailable"
 fi
 
