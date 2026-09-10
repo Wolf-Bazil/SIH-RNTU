@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from backend.services import gazetteer
+
 logger = logging.getLogger("orca.ask.intent")
 
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -356,6 +358,34 @@ _geo_cache: Dict[Tuple[str, str], Tuple[float, Optional[Dict[str, Any]]]] = {}
 _geo_lock = asyncio.Lock()
 
 
+# Case endings that attach to the place name itself in the Dravidian languages,
+# where "in Chennai" is one word: சென்னை + யில் = சென்னையில். The gazetteer
+# stores the bare name, so the inflected word is also tried with these endings
+# removed. Longest first, so "யில்" is stripped before "ல்" can bite into it.
+_INDIC_CASE_SUFFIXES = (
+    "யிலிருந்து", "இலிருந்து", "ிலிருந்து",       # Tamil ablative, "from"
+    "க்கு", "யில்", "ில்", "ின்", "ை", "இல்",      # Tamil dative/locative
+    "లోని", "లో", "కు",                           # Telugu
+    "ದಲ್ಲಿ", "ಗೆ",                                 # Kannada
+    "യിൽ", "ിൽ",                                   # Malayalam
+    "ে", "তে",                                     # Bengali locative
+)
+
+
+def _indic_forms(word: str) -> List[str]:
+    """The word itself, then the same word with one case ending removed.
+
+    Both are tried because the ending is sometimes part of the name. Stripping
+    is attempted once, not repeatedly: a second pass eats real syllables.
+    """
+    forms = [word]
+    for suffix in _INDIC_CASE_SUFFIXES:
+        if word.endswith(suffix) and len(word) - len(suffix) >= 3:
+            forms.append(word[: -len(suffix)])
+            break
+    return forms
+
+
 def candidate_places(question: str) -> List[str]:
     """Pull the phrases from a question that could be a place name.
 
@@ -386,9 +416,10 @@ def candidate_places(question: str) -> List[str]:
         stripped = re.sub(r"[!?.,;:()\[\]{}\"'|/\\।॥]", " ", question)
         words = [w for w in stripped.split() if len(w) >= 3]
         for word in sorted(words, key=len, reverse=True)[:4]:
-            if word not in candidates:
-                candidates.append(word)
-        return candidates
+            for form in _indic_forms(word):
+                if form not in candidates:
+                    candidates.append(form)
+        return candidates[:6]
 
     text = re.sub(r"[^\w\s'\-]", " ", question)
     lowered = text.lower()
@@ -467,6 +498,49 @@ async def _geocode_one(client: httpx.AsyncClient, name: str,
         return None
 
 
+# A named place must be somewhere a user could plausibly mean. An unpopulated
+# hamlet is not: India has villages called Dhaka, London and Paris, and letting
+# one of them answer "cyclone risk near Dhaka" is the same class of error as
+# answering Goa with Genoa, only pointing the other way.
+_OBSCURE_FEATURE_CODES = {"PPL", "PPLX", "PPLL", "PPLQ", "PPLH", "PPLW"}
+
+# What it takes for a foreign namesake to overrule that hamlet: a real city, not
+# merely another village that the fuzzy upstream search happened to surface.
+_FOREIGN_OVERRIDE_POPULATION = 100_000
+
+
+def _is_obscure(hit: Dict[str, Any]) -> bool:
+    return (hit.get("feature_code") in _OBSCURE_FEATURE_CODES
+            and not (hit.get("population") or 0))
+
+
+def _beats_obscure_namesake(upstream: Dict[str, Any],
+                            local: Optional[Dict[str, Any]]) -> bool:
+    """Whether an upstream match should be preferred to the local one.
+
+    Only reached for candidates whose local match was an unpopulated hamlet. The
+    upstream result has to be a genuinely large place to win; otherwise the
+    Indian namesake stands, because upstream matching is fuzzy and its runner-up
+    for an Indian village name is usually somewhere else entirely.
+    """
+    if local is None:
+        return True
+    return (upstream.get("population") or 0) >= _FOREIGN_OVERRIDE_POPULATION
+
+
+def _place_result(matched_on: str, hit: Dict[str, Any]) -> Dict[str, Any]:
+    """The one shape a resolved place takes, whichever source found it."""
+    return {
+        "found": True,
+        "matched_on": matched_on,
+        "city": hit.get("name"),
+        "state": hit.get("admin1") or hit.get("country") or "",
+        "country": hit.get("country"),
+        "lat": hit.get("latitude"),
+        "lon": hit.get("longitude"),
+    }
+
+
 async def extract_place(question: str, language: str = "en") -> Dict[str, Any]:
     """Resolve the place a question is about, if it names one.
 
@@ -475,18 +549,31 @@ async def extract_place(question: str, language: str = "en") -> Dict[str, Any]:
     outcome, not a failure: most questions name no place, and the caller then
     answers for the station the dashboard is showing.
 
+    Indian places are resolved from the local gazetteer first, in candidate
+    priority order. That catalogue is exact-match and India-only, which is what
+    the upstream geocoder is not: asked for "goa" it answers Genoa, Italy, and
+    asked for "panaji" it answers Guatemala, because it matches loosely and
+    ranks the whole world by population. Only candidates the gazetteer does not
+    know go upstream, so questions about foreign water still resolve.
+
     ``language`` is passed to the geocoder because it only matches a native
     spelling when asked in that language: "\u0935\u093f\u0936\u093e\u0916\u093e\u092a\u0924\u094d\u0924\u0928\u092e" resolves under ``hi`` and
-    returns nothing under ``en``.
-
-    Native-script coverage is partial -- the upstream index has Hindi
-    Visakhapatnam but not Hindi Paradip, and it does not handle case-inflected
-    Tamil ("\u0b9a\u0bc6\u0ba9\u0bcd\u0ba9\u0bc8\u0baf\u0bbf\u0bb2\u0bcd"). A miss is not an error: the answer is then given for
-    the point the dashboard is showing, and says so.
+    returns nothing under ``en``. The local gazetteer needs no such hint: it
+    indexes every spelling of a place, in every Indian script, under one key.
     """
     candidates = candidate_places(question)
     if not candidates:
         return {"found": False}
+
+    # The lookup is a single indexed SQLite query, but it is still blocking I/O,
+    # so it runs off the event loop.
+    local_hits = await asyncio.to_thread(
+        lambda: {c: gazetteer.lookup(c) for c in candidates}
+    )
+    for name in candidates:
+        hit = local_hits.get(name)
+        if hit and not _is_obscure(hit):
+            return _place_result(name, hit)
 
     now = time.monotonic()
     async with _geo_lock:
@@ -517,17 +604,15 @@ async def extract_place(question: str, language: str = "en") -> Dict[str, Any]:
 
     for name in candidates:
         hit = cached.get(name, fetched.get(name))
-        if not hit:
-            continue
-        return {
-            "found": True,
-            "matched_on": name,
-            "city": hit.get("name"),
-            "state": hit.get("admin1") or hit.get("country") or "",
-            "country": hit.get("country"),
-            "lat": hit.get("latitude"),
-            "lon": hit.get("longitude"),
-        }
+        if hit and _beats_obscure_namesake(hit, local_hits.get(name)):
+            return _place_result(name, hit)
+
+    # Nothing upstream worth preferring: an obscure local namesake, held back
+    # above in case the user meant the famous foreign city, is the best answer.
+    for name in candidates:
+        hit = local_hits.get(name)
+        if hit:
+            return _place_result(name, hit)
 
     return {"found": False}
 

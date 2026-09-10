@@ -11,6 +11,12 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 
 COPY backend/ backend/
 
+# Build the India gazetteer into the image: every state, district, town and
+# village, so place lookup resolves "Goa" to the state rather than to Genoa.
+# A failed build is not fatal -- the backend falls back to the upstream
+# geocoder -- so this must not break an image build behind a flaky network.
+RUN python backend/data/build_gazetteer.py --skip-if-present || true
+
 # Run as a non-root user
 RUN useradd --create-home --uid 10001 orca && chown -R orca:orca /srv
 USER orca

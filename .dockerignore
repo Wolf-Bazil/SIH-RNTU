@@ -11,6 +11,8 @@ env.txt
 .aider*
 
 # Python
+backend/data/india_places.sqlite3
+backend/data/*.sqlite3.tmp
 __pycache__/
 *.py[cod]
 venv/

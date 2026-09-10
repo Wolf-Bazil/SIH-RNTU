@@ -11,9 +11,23 @@ venv/
 .env.*
 env.txt
 
+# Generated India gazetteer (~57 MB). Derived from the GeoNames India dump by
+# `python backend/data/build_gazetteer.py`, which the image build runs, so the
+# binary itself is not tracked.
+backend/data/india_places.sqlite3
+backend/data/*.sqlite3.tmp
+
 # Node
 node_modules/
 frontend/dist/
+
+# Demo film. Source footage, the licensed music track and the rendered film are
+# all large binaries that are reproducible from `npm run capture` and
+# `npm run render`, so only the code that builds them is tracked.
+demo/out/
+demo/public/footage/
+demo/public/audio/
+demo/.raw-footage/
 
 # IDE
 .vscode/
