@@ -84,8 +84,13 @@ export default function App() {
           </ErrorBoundary>
         </aside>
 
-        {/* Interaction rail. */}
-        <aside className="scroll-slim flex min-h-0 w-full shrink-0 flex-col gap-3 overflow-y-auto border-slate-200 bg-white/60 p-3 lg:w-[330px] lg:border-l xl:w-[360px]">
+        {/* Interaction rail. On a wide screen the two panels split it in half
+            and scroll inside themselves, so a long conversation grows its own
+            transcript instead of pushing the alert feed off the bottom. On a
+            narrow screen they stack at their natural height and the rail
+            scrolls as a whole, which is the right behaviour when there is no
+            room to halve. */}
+        <aside className="scroll-slim flex min-h-0 w-full shrink-0 flex-col gap-3 overflow-y-auto border-slate-200 bg-white/60 p-3 lg:w-[330px] lg:overflow-hidden lg:border-l xl:w-[360px]">
           <ErrorBoundary label="Ask ORCA">
             <AskPanel language={language} station={station} t={t} />
           </ErrorBoundary>

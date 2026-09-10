@@ -145,7 +145,10 @@ export default function AskPanel({ language, station, t }) {
   const started = turns.length > 0
 
   return (
-    <section className="card flex flex-col p-4">
+    // Before the first question there is nothing to scroll, so the panel keeps
+    // its natural height and the alert feed uses the rail. It claims its half
+    // only once a conversation exists to fill it.
+    <section className={`card flex min-h-0 flex-col p-4 ${started ? 'lg:flex-1 lg:basis-0' : ''}`}>
       <div className="mb-2.5 flex items-center justify-between">
         <h2 className="text-sm font-bold text-abyss-900">{t('ask')}</h2>
         {started && (
@@ -159,8 +162,14 @@ export default function AskPanel({ language, station, t }) {
         )}
       </div>
 
+      {/* The transcript is the part that gives: capped on a narrow screen, and
+          on a wide one it takes whatever the panel's half of the rail leaves
+          after the composer, so it never grows the card itself. */}
       {started && (
-        <div ref={scrollRef} className="scroll-slim mb-2.5 max-h-80 space-y-2 overflow-y-auto pr-1">
+        <div
+          ref={scrollRef}
+          className="scroll-slim mb-2.5 max-h-80 space-y-2 overflow-y-auto pr-1 lg:max-h-none lg:min-h-0 lg:flex-1"
+        >
           {turns.map((turn, i) => (
             turn.role === 'user' ? (
               <div key={i} className="flex justify-end">

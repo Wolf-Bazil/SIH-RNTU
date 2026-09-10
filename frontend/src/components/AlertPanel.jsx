@@ -21,7 +21,7 @@ const SEVERITY = {
 
 export default function AlertPanel({ alerts = [], connected, t, onFocus }) {
   return (
-    <section className="card flex min-h-0 flex-1 flex-col p-4">
+    <section className="card flex min-h-0 flex-1 flex-col p-4 lg:basis-0">
       <div className="mb-3 flex items-center justify-between">
         <h2 className="text-sm font-bold text-abyss-900">{t('alerts')}</h2>
         <span className="flex items-center gap-1.5 text-[10px] font-medium text-slate-400">
